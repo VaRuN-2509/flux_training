@@ -101,7 +101,74 @@ class SelfAttention(nn.Module):
         x = attention(q, k, v, pe=pe)
         x = self.proj(x)
         return x
+    
+class StrengthProjector(nn.Module):
+    """
+    Maps scalar strength s and pooled text embedding to modulation offsets.
+    Implements the 4-layer MLP described in Appendix A.3 of the paper.
 
+    Implementation notes:
+    - We encode s with sinusoidal positional encoding to 128 dims, then
+      linear -> 768, concat with pooled_text (768) => 1536 input.
+    - MLP dims: 1536 -> 256 -> 128 -> D_out.
+    - For simplicity and stability we output a per-token *shared* offset of
+      shape (B, 1, 2*hidden), which is then broadcast to text token length.
+      This matches the intended effect of the projector while keeping
+      implementation robust across different text lengths.
+    - If you need per-token unique offsets, you can grow the final layer
+      to (2 * hidden * text_len) at init time (requires knowing text_len).
+    """
+    def __init__(self, hidden_size: int, proj_in_dim: int = 1536, posenc_dim: int = 128, mlp_dims=(256, 128)):
+        super().__init__()
+        self.hidden = hidden_size
+        self.posenc_dim = posenc_dim
+
+        # encode scalar s -> pos enc -> linear -> 768
+        self.s_posenc_linear = nn.Linear(posenc_dim, 768)
+
+        # projector MLP: 1536 -> 256 -> 128 -> 2*hidden
+        h1, h2 = mlp_dims
+        self.fc1 = nn.Linear(proj_in_dim, h1)
+        self.act1 = nn.SiLU()
+        self.fc2 = nn.Linear(h1, h2)
+        self.act2 = nn.SiLU()
+        # final outputs two vectors: delta_scale and delta_shift
+        self.fc_out = nn.Linear(h2, 2 * hidden_size)
+
+    @staticmethod
+    def sinusoidal_posenc(x: Tensor, dim: int = 128):
+        # x: (B, 1) or (B,)
+        # produce (B, dim)
+        device = x.device
+        x = x.float().view(-1, 1)
+        half = dim // 2
+        freqs = torch.exp(-math.log(10000.0) * torch.arange(half, device=device, dtype=torch.float32) / half)
+        args = x * freqs[None, :]
+        posenc = torch.cat([torch.sin(args), torch.cos(args)], dim=-1)
+        if dim % 2:
+            posenc = torch.cat([posenc, torch.zeros(posenc.shape[0], 1, device=device)], dim=-1)
+        return posenc  # (B, dim)
+
+    def forward(self, s: Tensor, pooled_text: Tensor, txt_len: int | None = None) -> tuple[Tensor, Tensor]:
+        """
+        s: (B,) scalar value in [0,1]
+        pooled_text: (B, hidden) (e.g. txt.mean(dim=1) or CLIP pooled embedding)
+        returns: delta_shift, delta_scale each shaped (B, 1, hidden) to be broadcast over tokens
+        """
+        B = pooled_text.shape[0]
+        posenc = self.sinusoidal_posenc(s, self.posenc_dim)            # (B, posenc_dim)
+        s_emb = self.s_posenc_linear(posenc)                          # (B, 768)
+        cat = torch.cat([s_emb, pooled_text], dim=-1)                 # (B, 1536)
+        h = self.act1(self.fc1(cat))
+        h = self.act2(self.fc2(h))
+        out = self.fc_out(h)                                          # (B, 2*hidden)
+        delta_scale, delta_shift = out.chunk(2, dim=-1)               # each (B, hidden)
+
+        # reshape to (B, 1, hidden) to broadcast across token dim later
+        delta_scale = delta_scale[:, None, :]
+        delta_shift = delta_shift[:, None, :]
+
+        return delta_shift, delta_scale
 
 @dataclass
 class ModulationOut:
@@ -155,9 +222,18 @@ class DoubleStreamBlock(nn.Module):
             nn.Linear(mlp_hidden_dim, hidden_size, bias=True),
         )
 
-    def forward(self, img: Tensor, txt: Tensor, vec: Tensor, pe: Tensor) -> tuple[Tensor, Tensor]:
+    def forward(self, img: Tensor, txt: Tensor, vec: Tensor, pe: Tensor,txt_mod_deltas:tuple[Tensor,Tensor]) -> tuple[Tensor, Tensor]:
         img_mod1, img_mod2 = self.img_mod(vec)
         txt_mod1, txt_mod2 = self.txt_mod(vec)
+
+        if txt_mod_deltas is not None:
+            delta_shift, delta_scale = txt_mod_deltas  # (B, 1, hidden)
+            # Add deltas to both modulation levels (text tokens). Broadcast along token axis
+            txt_mod1.shift = txt_mod1.shift + delta_shift
+            txt_mod1.scale = txt_mod1.scale + delta_scale
+            txt_mod2.shift = txt_mod2.shift + delta_shift
+            txt_mod2.scale = txt_mod2.scale + delta_scale
+
 
         # prepare image for attention
         img_modulated = self.img_norm1(img)
