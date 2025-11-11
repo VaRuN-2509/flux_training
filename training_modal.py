@@ -4,40 +4,51 @@ import subprocess
 import os
 
 GPU_TYPE = "A100"
-PROJECT_FOLDER = "."  # include all files in this folder
+PROJECT_FOLDER = "."  # folder with your training script
 SCRIPT_NAME = "training.py"  # the script to execute
 
-# ---- Build the Modal Image ----
-image = (
+# ---- Step 1: Build the base image (only rebuilt when dependencies change) ----
+# Give this image a unique tag, e.g., "flux-training-env:v1"
+# If you change dependencies, bump to "v2" or similar.
+base_image = (
     modal.Image.debian_slim(python_version="3.10")
-    # System dependencies (OpenCV, Torch, etc.)
     .apt_install(["libgl1", "libglib2.0-0", "libsm6", "libxrender1", "libxext6"])
-    
-    # Upload your entire project directory to /root/flux_training
-    .add_local_dir(PROJECT_FOLDER, remote_path="/root/flux_training", copy=True)
-    
-    # Install Python dependencies in editable mode
-    .run_commands(
-        "cd /root/flux_training && pip install -e .[all]"
+    .pip_install(
+        "torch",
+        "diffusers>=0.31.0",
+        "transformers>=4.46.0",
+        "accelerate",
+        "safetensors",
+        "modal",
+        "opencv-python",
+        "numpy",
+        "Pillow",
     )
+    # Optional: install your package (without adding project code, for speed)
+    .run_commands("pip install -e /root/flux_training[all] || true")
 )
 
-# ---- Define Modal App ----
-app = modal.App(name="run-flux-training")
+# ---- Step 2: Define Modal App ----
+app = modal.App(name="flux-train")
 
 @app.function(
-    image=image,
+    image=base_image,  # reuse the cached image
     gpu=GPU_TYPE,
-    timeout=1800,  # seconds (30 min); increase for longer runs
+    timeout=6 * 3600,  # 6 hours
+    mounts=[
+        modal.Mount.from_local_dir(
+            PROJECT_FOLDER,  # your local code directory
+            remote_path="/root/flux_training",  # mounted path in container
+        )
+    ],
 )
 def run_training():
-    print(f"--- Running '{SCRIPT_NAME}' in {PROJECT_FOLDER} on {GPU_TYPE} GPU ---")
+    print(f"--- Running '{SCRIPT_NAME}' on {GPU_TYPE} ---")
 
     cwd = "/root/flux_training"
     env = os.environ.copy()
-    env["PYTHONPATH"] = cwd  # ensures imports like `from flux import ...` work
+    env["PYTHONPATH"] = cwd
 
-    # Command to run the script
     command = [sys.executable, SCRIPT_NAME]
 
     process = subprocess.Popen(
@@ -50,18 +61,16 @@ def run_training():
         bufsize=1
     )
 
-    # Stream output live to Modal logs
     for line in process.stdout:
         print(line, end="")
         sys.stdout.flush()
 
     process.wait()
     print(f"--- Training finished with exit code {process.returncode} ---")
-
     if process.returncode != 0:
         raise SystemExit(f"Training script exited with code {process.returncode}")
 
 @app.local_entrypoint()
 def main():
-    print(f"Deploying and running '{SCRIPT_NAME}' from '{PROJECT_FOLDER}' on Modal...")
+    print(f"Deploying '{SCRIPT_NAME}' with cached dependencies...")
     run_training.remote()

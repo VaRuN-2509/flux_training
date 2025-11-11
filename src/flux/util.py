@@ -654,18 +654,15 @@ def print_load_warning(missing: list[str], unexpected: list[str]) -> None:
         print(f"Got {len(unexpected)} unexpected keys:\n\t" + "\n\t".join(unexpected))
 
 
-def load_flow_model(name: str, device: str | torch.device = "cuda", verbose: bool = True) -> Flux:
+def load_flow_model(model: FluxLoraWrapper, device: str | torch.device = "cuda", verbose: bool = True) :
     # Loading Flux
+    name = "flux-dev-kontext"
     print("Init model")
     config = configs[name]
 
     ckpt_path = str(get_checkpoint_path(config.repo_id, config.repo_flow, "FLUX_MODEL"))
 
-    with torch.device("meta"):
-        if config.lora_repo_id is not None and config.lora_filename is not None:
-            model = FluxLoraWrapper(params=config.params).to(torch.bfloat16)
-        else:
-            model = Flux(config.params).to(torch.bfloat16)
+    
 
     print(f"Loading checkpoint: {ckpt_path}")
     # load_sft doesn't support torch.device
@@ -682,8 +679,9 @@ def load_flow_model(name: str, device: str | torch.device = "cuda", verbose: boo
         # loading the lora params + overwriting scale values in the norms
         missing, unexpected = model.load_state_dict(lora_sd, strict=False, assign=True)
         if verbose:
+            
             print_load_warning(missing, unexpected)
-    return model
+    return model,missing
 
 
 def load_t5(device: str | torch.device = "cuda", max_length: int = 512) -> HFEmbedder:
