@@ -2,13 +2,10 @@ import torch
 from torch import nn
 
 
-def replace_linear_with_lora(
-    module: nn.Module,
-    max_rank: int,
-    scale: float = 1.0,
-) -> None:
+def replace_linear_with_lora(module, max_rank, scale=1.0):
     for name, child in module.named_children():
-        if isinstance(child, nn.Linear):
+        # Only replace attention projection matrices
+        if isinstance(child, nn.Linear) and any(k in name.lower() for k in ["q", "k", "v", "proj"]):
             new_lora = LinearLora(
                 in_features=child.in_features,
                 out_features=child.out_features,
@@ -18,17 +15,12 @@ def replace_linear_with_lora(
                 dtype=child.weight.dtype,
                 device=child.weight.device,
             )
-
             new_lora.weight = child.weight
-            new_lora.bias = child.bias if child.bias is not None else None
-
+            new_lora.bias = child.bias
             setattr(module, name, new_lora)
         else:
-            replace_linear_with_lora(
-                module=child,
-                max_rank=max_rank,
-                scale=scale,
-            )
+            replace_linear_with_lora(child, max_rank, scale)
+
 
 
 class LinearLora(nn.Linear):

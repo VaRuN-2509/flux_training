@@ -90,6 +90,7 @@ class Flux(nn.Module):
         img_ids: Tensor,
         txt: Tensor,
         txt_ids: Tensor,
+        pooled_txt: Tensor,
         timesteps: Tensor,
         y: Tensor,
         guidance: Tensor | None = None,
@@ -99,6 +100,7 @@ class Flux(nn.Module):
             raise ValueError("Input img and txt tensors must have 3 dimensions.")
 
         # running on sequences img
+        print(f"in_channels = {self.in_channels}, hidden_size = {self.hidden_size}")
         img = self.img_in(img)
         vec = self.time_in(timestep_embedding(timesteps, 256))
         if self.params.guidance_embed:
@@ -111,7 +113,7 @@ class Flux(nn.Module):
         ids = torch.cat((txt_ids, img_ids), dim=1)
         pe = self.pe_embedder(ids)
 
-        pooled_txt = txt.mean(dim=1)
+        pooled_txt = pooled_txt
         strengths = timesteps.new_ones(txt.shape[0]) if 'strengths' not in locals() else strengths
 
         delta_shift, delta_scale = self.strength_projector(strengths, pooled_txt)
