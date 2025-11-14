@@ -25,19 +25,21 @@ from src.flux.util import load_flow_model, load_ae, load_clip,load_t5
 from src.flux.modules.layers import timestep_embedding
 
 
+
 # ================================================================
 # 1️⃣ Dataset: loads paired (x, y_s, s, prompt)
 # ================================================================
 class FluxLatentDataset(Dataset):
     """
-    Dataset for curated edit dataset where:
-      root/
-        edit_type/
-          0/
-            0_s0.png, 0_s1.png, ... 0_s7.png
-          1/
-            1_s0.png, ...
-        prompts.json : {"0": "replace sky with sunset", ...}
+    Dataset for curated edit dataset.
+
+    Expected structure:
+      images_dir/
+        1/
+          1_s0.png, 1_s1.png, ..., 1_s7.png
+      prompt/
+        edit_1/
+          data_loaded.json : {"exp_id": 1, "edit_prompt": "..."}
     """
 
     def __init__(self, root, json_dir, size=512):
@@ -46,63 +48,63 @@ class FluxLatentDataset(Dataset):
         self.json_dir = json_dir
         self.samples = []
 
-        # --- Load all experiment metadata into a dict keyed by exp_id ---
-          # store full entry for later access
+        # --- Load JSON metadata ---
+        json_path = os.path.join(json_dir, "edit_1", "data_loaded.json")
+        if not os.path.exists(json_path):
+            raise FileNotFoundError(f"Missing {json_path}")
 
-        # --- Now iterate through root folders (each folder = exp_id) ---
-        for i,edit_type in enumerate(os.listdir(root)):
-            et_path = os.path.join(root, edit_type)
-            if not os.path.isdir(et_path):
+        with open(json_path, "r") as f:
+            content = f.read().strip()
+            try:
+                data = json.loads(content)
+                if isinstance(data, dict):
+                    data = [data]
+            except json.JSONDecodeError as e:
+                print(f"JSON decode error: {e}")
+                f.seek(0)
+                data = [json.loads(line) for line in f if line.strip()]
+
+        self.exp_data = {d["exp_id"]: d for d in data}
+        print(f"📄 Loaded {len(self.exp_data)} experiment entries from {json_path}")
+
+        # --- Collect samples ---
+        for case in sorted(os.listdir(root)):
+            folder = os.path.join(root, case)
+            if not os.path.isdir(folder):
                 continue
-            with open(os.path.join(self.json_dir, f"edit_{i+1}/data_loaded.json"), 'r') as f:
-                self.exp_data = {}
-                for line in f:
-                    if not line.strip():
-                        continue
-                    entry = json.loads(line)
-                    exp_id = entry["exp_id"]
-                    self.exp_data[exp_id] = entry
 
-            for case in os.listdir(et_path):
-                folder = os.path.join(et_path, case)
-                if not os.path.isdir(folder):
-                    continue
+            files = sorted([f for f in os.listdir(folder) if f.lower().endswith(".png")])
+            if len(files) <= 1:
+                print(f"⚠️ Skipping {folder} (not enough images)")
+                continue
 
-                files = sorted([f for f in os.listdir(folder) if f.endswith(".png")])
+            try:
+                exp_id = int(case)
+            except ValueError:
+                print(f"⚠️ Skipping invalid folder name: {case}")
+                continue
 
-                if len(files) <= 1:
-                    continue
+            if exp_id not in self.exp_data:
+                print(f"⚠️ exp_id {exp_id} not found in JSON. Using first available entry.")
+                prompt = next(iter(self.exp_data.values()))["edit_prompt"]
+            else:
+                prompt = self.exp_data[exp_id]["edit_prompt"]
 
-                # Assume folder name (or edit_type) is exp_id
-                try:
-                    exp_id = int(case)  # or int(edit_type), depending on your structure
-                except ValueError:
-                    print(f"Skipping non-integer folder name: {case}")
-                    continue
+            src = os.path.join(folder, files[0])
+            N = len(files) - 2 if len(files) > 2 else 1
 
-                # --- Fetch the corresponding prompts from JSON ---
-                if exp_id not in self.exp_data:
-                    print(f"⚠️ Warning: exp_id {exp_id} not found in JSON")
-                    continue
-
-                prompts = self.exp_data[exp_id]["edit_prompt"]
-
-                src = os.path.join(folder, files[0])
-                N = len(files) - 2
-
-                for i, f in enumerate(files):
-                    if i == 0:
-                        continue
-                    tgt = os.path.join(folder, f)
-                    s_val = 0 if i == 1 else i / N
-                    prompt = prompts[min(i-1, len(prompts)-1)]  # safe index
-                    self.samples.append((src, tgt, s_val, prompt))
+            for i, f in enumerate(files[1:], 1):
+                tgt = os.path.join(folder, f)
+                s_val = 0 if i == 1 else i / N
+                self.samples.append((src, tgt, s_val, prompt))
 
         self.preproc = transforms.Compose([
             transforms.Resize((size, size)),
             transforms.ToTensor(),
             transforms.Normalize([0.5]*3, [0.5]*3)
         ])
+
+        print(f"✅ Loaded {len(self.samples)} samples from {root}")
 
     def __len__(self):
         return len(self.samples)
@@ -111,7 +113,7 @@ class FluxLatentDataset(Dataset):
         src, tgt, s_val, prompt = self.samples[idx]
         x = self.preproc(Image.open(src).convert("RGB"))
         y = self.preproc(Image.open(tgt).convert("RGB"))
-        return x, y, torch.tensor(s_val, dtype=torch.float32), prompt
+        return x, y, torch.tensor(s_val, dtype=torch.float), prompt
 
 
 # ================================================================
@@ -119,33 +121,41 @@ class FluxLatentDataset(Dataset):
 # ================================================================
 class FluxPreprocessor:
     def __init__(self, ae, clip, t5, device):
+        self.device = device
         self.ae = ae.eval().to(device)
         self.clip = clip.eval().to(device)
         self.t5 = t5.eval().to(device)
-        self.device = device
         self.latent_proj = torch.nn.Linear(16, 64).to(device)
+        nn.init.xavier_normal_(self.latent_proj.weight, gain=0.1)
+        nn.init.constant_(self.latent_proj.bias, 0)
 
     @torch.no_grad()
-    @torch.autocast("cuda", dtype=torch.bfloat16)
     def encode_images(self, imgs):
-        lat = self.ae.encode(imgs.to(self.device))
-        lat = lat.flatten(2).transpose(1, 2)
-        lat = self.latent_proj(lat)
+        imgs = imgs.to(self.device, non_blocking=True)
+        with torch.autocast("cuda", dtype=torch.float16):
+            lat = self.ae.encode(imgs)
+            lat = lat.flatten(2).transpose(1, 2)
+            lat = self.latent_proj(lat)
+        # keep results on GPU (no .cpu())
         return lat
+
 
     @torch.no_grad()
     def encode_texts(self, prompts):
-        # CLIP pooled embedding (for strength projector)
-        clip_emb = self.clip(list(prompts))  # [B, 768]
+        self.clip.to(self.device)
+        clip_emb = self.clip(list(prompts))
+        self.clip.to("cpu")
 
-        # T5 contextual embeddings (for transformer conditioning)
-        t5_emb = self.t5(list(prompts))      # [B, seq_len, 4096]
-        txt_seq = t5_emb  
+        self.t5.to(self.device)
+        t5_emb = self.t5(list(prompts))
+        self.t5.to("cpu")
+
+        txt_seq = t5_emb
         B = txt_seq.shape[0]
-           # assuming square latent grid
-        txt_ids = self.make_txt_ids(B, txt_seq.shape[1], self.device)                  # rename for clarity
+        txt_ids = self.make_txt_ids(B, txt_seq.shape[1], self.device)
         
-        return txt_seq, txt_ids, clip_emb
+        torch.cuda.empty_cache()
+        return txt_seq.cpu(), txt_ids.cpu(), clip_emb.cpu()
     
     def make_img_ids(self,H, W, B, device):
         y, x = torch.meshgrid(
@@ -175,6 +185,26 @@ class FluxPreprocessor:
         txt_seq, txt_ids, clip_emb = self.encode_texts(prompts)
         return x_seq, y_seq, img_ids, txt_seq, txt_ids, clip_emb
 
+# MEASURE USAGE
+def print_gpu(prefix=""):
+    """Print current GPU memory usage and peak since last reset."""
+    if not torch.cuda.is_available():
+        print("[CPU only]")
+        return
+    alloc = torch.cuda.memory_allocated() / 1024**2
+    reserv = torch.cuda.memory_reserved() / 1024**2
+    print(f"[GPU] {prefix:<25} | Alloc: {alloc:8.2f} MB | Reserved: {reserv:8.2f} MB")
+
+def report_tensor_size(name, t):
+    """Print tensor name, shape, dtype, and memory size in MB."""
+    if t is None:
+        return
+    if not isinstance(t, torch.Tensor):
+        print(f"{name}: not a tensor")
+        return
+    numel = t.numel()
+    mem_mb = numel * t.element_size() / 1024**2
+    print(f"{name:<20}: shape={tuple(t.shape)}, dtype={t.dtype}, size={mem_mb:7.2f} MB")
 
 
 # ================================================================
@@ -184,62 +214,101 @@ def train_flux_kontext(model, dataloader, preproc, device="cuda",
                        lr=2e-5, epochs=10, save_dir="checkpoints"):
 
     os.makedirs(save_dir, exist_ok=True)
-    model.to(device)
+    model.to(device,dtype=torch.float)
+    # model.gradient_checkpointing_enable()
     optimizer = torch.optim.AdamW(filter(lambda p: p.requires_grad, model.parameters()), lr=lr)
     scaler = torch.cuda.amp.GradScaler()
 
     for epoch in range(epochs):
         pbar = tqdm(dataloader, desc=f"Epoch {epoch+1}")
-        for x_rgb, y_rgb, s, prompts in pbar:
-            s = s.to(device)
+        for step, (x_rgb, y_rgb, s, prompts) in enumerate(pbar):
+            
+            print_gpu(f"Start of step {step}")
+
+            s = s.to(device, non_blocking=True)
             x_seq, y_seq, img_ids, txt_seq, txt_ids, pooled_txt = preproc.prepare_batch(x_rgb, y_rgb, prompts)
 
-            # Sample random timestep t ∈ [0,1] and Gaussian noise ε
-            eps = torch.randn_like(y_seq)
-            print(eps.shape)
-            t = torch.rand(y_seq.shape[0], 1, 1, device=y_seq.device)
-            print(t.shape)
-            print(y_seq.shape)
-            y_t = (1 - t) * y_seq + t * eps
+            print_gpu("After preprocessing")
+            for name, t in zip(
+                ["x_seq", "y_seq", "img_ids", "txt_seq", "txt_ids", "pooled_txt"],
+                [x_seq, y_seq, img_ids, txt_seq, txt_ids, pooled_txt]
+            ):
+                report_tensor_size(name, t)
 
-            # Drop slider conditioning with p=0.1 (regularization)
+            # Move to GPU (half precision)
+            x_seq, y_seq, img_ids, txt_seq, txt_ids, clip_txt = [
+                t.to(device, non_blocking=True) for t in (x_seq, y_seq, img_ids, txt_seq, txt_ids, pooled_txt)
+            ]
+            print_gpu("After moving tensors to GPU")
+
+            x_seq = x_seq.to(device, non_blocking=True, dtype=torch.float)
+            y_seq = y_seq.to(device, non_blocking=True, dtype=torch.float)
+            txt_seq = txt_seq.to(device, non_blocking=True, dtype=torch.float)
+            clip_txt = clip_txt.to(device, non_blocking=True, dtype=torch.float)
+            
+            # IDs can keep their original type (likely int or float)
+            img_ids = img_ids.to(device, non_blocking=True,dtype=torch.float) 
+            txt_ids = txt_ids.to(device, non_blocking=True,dtype=torch.float)
+            report_tensor_size("img_ids",img_ids)
+            report_tensor_size("txt_ids",txt_ids)
+            print_gpu("After moving tensors to GPU")
+
+            with torch.no_grad():
+                eps = torch.randn_like(y_seq)
+                t = torch.rand(y_seq.size(0), 1, 1, dtype=torch.float,device=device)
+                y_seq = (1 - t) * y_seq + t * eps
+
+            print_gpu("After noise mix")
+
             if torch.rand(1) < 0.1:
                 s = torch.zeros_like(s)
 
             optimizer.zero_grad(set_to_none=True)
-            with torch.cuda.amp.autocast(dtype=torch.bfloat16):
-                print()
-                print(f"input image shape : {y_t.shape}")
-                print(f"text shape {txt_seq.shape}")
-                print(f"conditioning image : {x_seq.shape}")
-                print(f"img_ids.shape: {img_ids.shape}")
-                print(f"txt_id shape : {txt_ids.shape}")
-                v_pred =  model(
-                    img=y_t,
-                    img_ids=img_ids,
-                    txt=txt_seq,           # 4096-dim T5 tokens
-                    txt_ids=txt_ids,
-                    pooled_txt = pooled_txt,
-                    timesteps=t.squeeze(),
-                    y=pooled_txt,
-                    guidance=torch.ones_like(t.squeeze()),
-                    strengths=s,
-                )
+            model.train()
+            v_pred32 = model(
+                img=y_seq,
+                img_ids=img_ids,
+                txt=txt_seq,
+                txt_ids=txt_ids,
+                pooled_txt=clip_txt,
+                timesteps=t.view(-1),
+                y=clip_txt,
+                guidance=torch.ones_like(t.view(-1)),
+                strengths=s
+            )
+            print("v_pred32 min/max:", v_pred32.min(), v_pred32.max(), "anynan:", torch.isnan(v_pred32).any())
 
-                target = eps - x_seq
-                loss = F.mse_loss(v_pred, target)
+            print_gpu("After forward pass")
+            report_tensor_size("v_pred", v_pred32)
+            report_tensor_size("x_seq", x_seq)
+            target = (eps - x_seq).float()
+            loss = F.mse_loss(v_pred32 , target)
+            print(f"Target : {target}")
+            print(f"loss: {loss}")
+
+            if torch.isnan(loss):
+                print("NaN detected!")
+                print("v_pred min/max", v_pred32.min(), v_pred32.max())
+                print("target min/max", target.min(), target.max())
 
             scaler.scale(loss).backward()
+            print_gpu("After backward pass")
+
             scaler.step(optimizer)
             scaler.update()
 
+            print_gpu("After optimizer step")
+
             pbar.set_postfix({"loss": f"{loss.item():.4f}"})
+
+            # cleanup
+            del x_seq, y_seq, eps, v_pred32, pooled_txt, txt_seq
+            torch.cuda.empty_cache()
 
         torch.save(model.state_dict(), os.path.join(save_dir, f"epoch_{epoch+1}.pt"))
         print(f"✅ Saved checkpoint epoch {epoch+1} | Loss: {loss.item():.4f}")
 
     print("🎯 Training Complete")
-
 
 # ================================================================
 # 4️⃣ Main
@@ -290,10 +359,10 @@ def main(args):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Train Flux Kontext in latent space (LoRA + projector)")
-    parser.add_argument("--data_root", type=str, required=True, help="Path to curated dataset root")
-    parser.add_argument("--json",type=str, required=True, help="Path to saved metadata root")
+    parser.add_argument("--data_root", type=str, help="Path to curated dataset root",default="images_dir")
+    parser.add_argument("--json",type=str, help="Path to saved metadata root",default="prompt")
     parser.add_argument("--save_dir", type=str, default="checkpoints", help="Checkpoint output dir")
-    parser.add_argument("--batch_size", type=int, default=4)
+    parser.add_argument("--batch_size", type=int, default=1)
     parser.add_argument("--epochs", type=int, default=10)
     parser.add_argument("--lr", type=float, default=2e-5)
     parser.add_argument("--image_size", type=int, default=512)

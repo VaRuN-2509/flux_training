@@ -3,27 +3,71 @@ import sys
 import subprocess
 import os
 
-GPU_TYPE = "A100"
+GPU_TYPE = "A100-80GB"
 PROJECT_FOLDER = "."  # include all files in this folder
 SCRIPT_NAME = "training.py"  # the script to execute
 
+all_deps = [
+    # --- Core dependencies ---
+    "accelerate",
+    "einops",
+    "fire>=0.6.0",
+    "huggingface-hub",
+    "safetensors",
+    "sentencepiece",
+    "transformers>=4.45.2",
+    "tokenizers",
+    "protobuf",
+    "requests",
+    "invisible-watermark",
+    "ruff==0.6.8",
+    "accelerate",
+
+    # --- Optional: torch ---
+    "torch==2.6.0",
+    "torchvision",
+
+    # --- Optional: streamlit ---
+    "streamlit",
+    "streamlit-drawable-canvas",
+    "streamlit-keyup",
+
+    # --- Optional: gradio ---
+    "gradio",
+
+    # --- Optional: tensorrt ---
+    "tensorrt-cu12==10.12.0.36",
+    "colored",
+    "opencv-python-headless==4.8.0.74",
+    "onnx>=1.18.0",
+    "onnxruntime~=1.22.0",
+    "onnxruntime-gpu~=1.22.0",
+    "onnx-graphsurgeon",
+    "polygraphy>=0.49.22",
+
+    # --- Meta optional group `all` ---
+    "flux[gradio]",
+    "flux[streamlit]",
+    "flux[torch]",
+]
+
+# all_deps = ['accelerate', 'torchvision', 'einops', 'fire >= 0.6.0', 'huggingface-hub', 'safetensors', 'sentencepiece', 'transformers >= 4.45.2', 'tokenizers', 'protobuf', 'requests', 'invisible-watermark', 'ruff == 0.6.8', 'accelerate', 'flux[gradio]', 'flux[streamlit]', 'flux[torch]']
 # ---- Build the Modal Image ----
 image = (
-    modal.Image.debian_slim(python_version="3.10")
-    # System dependencies (OpenCV, Torch, etc.)
-    .apt_install(["libgl1", "libglib2.0-0", "libsm6", "libxrender1", "libxext6"])
-    
-    # Upload your entire project directory to /root/flux_training
+    modal.Image.debian_slim(python_version="3.12")
+    .apt_install([
+        "libgl1",
+        "libglib2.0-0",
+        "libsm6",
+        "libxrender1",
+        "libxext6"
+    ])
     .add_local_dir(PROJECT_FOLDER, remote_path="/root/flux_training", copy=True)
-    
-    # Install Python dependencies in editable mode
-    .run_commands(
-        "cd /root/flux_training && pip install -e .[all]"
-    )
+    .run_commands("cd /root/flux_training")
+    .uv_pip_install(all_deps + ["numpy<2"])
 )
-
 # ---- Define Modal App ----
-app = modal.App(name="run-flux-training")
+app = modal.App(image=image, name="run-flux-training")
 
 @app.function(
     image=image,
@@ -35,8 +79,8 @@ def run_training():
 
     cwd = "/root/flux_training"
     env = os.environ.copy()
-    env["PYTHONPATH"] = cwd  # ensures imports like `from flux import ...` work
-
+    # env["PYTHONPATH"] = cwd  # ensures imports like `from flux import ...` work
+    env["PYTHONPATH"] = f"{cwd}:{cwd}/src"
     # Command to run the script
     command = [sys.executable, SCRIPT_NAME]
 

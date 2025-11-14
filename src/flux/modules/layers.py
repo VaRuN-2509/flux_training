@@ -135,6 +135,8 @@ class StrengthProjector(nn.Module):
         # final outputs two vectors: delta_scale and delta_shift
         self.fc_out = nn.Linear(h2, 2 * hidden_size)
 
+        self.init_weights()
+
     @staticmethod
     def sinusoidal_posenc(x: Tensor, dim: int = 128):
         # x: (B, 1) or (B,)
@@ -169,6 +171,21 @@ class StrengthProjector(nn.Module):
         delta_shift = delta_shift[:, None, :]
 
         return delta_shift, delta_scale
+    
+    
+
+    def init_weights(self):
+
+        nn.init.kaiming_uniform_(self.fc1.weight,nonlinearity="leaky_relu")
+        nn.init.kaiming_uniform_(self.fc2.weight,nonlinearity="leaky_relu")
+        nn.init.xavier_uniform_(self.fc_out.weight,gain=1e-2)
+        
+
+        nn.init.zeros_(self.fc1.bias)
+        nn.init.zeros_(self.fc2.bias)
+        nn.init.zeros_(self.fc_out.bias)
+
+
 
 @dataclass
 class ModulationOut:
@@ -222,9 +239,24 @@ class DoubleStreamBlock(nn.Module):
             nn.Linear(mlp_hidden_dim, hidden_size, bias=True),
         )
 
+    def debug(self,name, tensor):
+        if not isinstance(tensor, torch.Tensor):
+            print(f"[{name}] not a tensor")
+            return
+        t = tensor
+        print(f"[{name}] min={t.min().item():.5f}, max={t.max().item():.5f}, "
+            f"mean={t.mean().item():.5f}, any_nan={torch.isnan(t).any().item()}, "
+            f"dtype={t.dtype}, shape={tuple(t.shape)}")
+
     def forward(self, img: Tensor, txt: Tensor, vec: Tensor, pe: Tensor,txt_mod_deltas:tuple[Tensor,Tensor]) -> tuple[Tensor, Tensor]:
         img_mod1, img_mod2 = self.img_mod(vec)
         txt_mod1, txt_mod2 = self.txt_mod(vec)
+
+        self.debug("txt_mod1",txt_mod1.shift)
+        self.debug("txt_mod2",txt_mod2.shift)
+        self.debug("txt_mod1",txt_mod1.scale)
+        self.debug("txt_mod2",txt_mod2.scale)
+
 
         if txt_mod_deltas is not None:
             delta_shift, delta_scale = txt_mod_deltas  # (B, 1, hidden)
@@ -233,6 +265,7 @@ class DoubleStreamBlock(nn.Module):
             txt_mod1.scale = txt_mod1.scale + delta_scale
             txt_mod2.shift = txt_mod2.shift + delta_shift
             txt_mod2.scale = txt_mod2.scale + delta_scale
+
 
 
         # prepare image for attention
