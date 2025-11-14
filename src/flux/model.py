@@ -65,9 +65,8 @@ class Flux(nn.Module):
         self.pe_embedder = EmbedND(dim=pe_dim, theta=params.theta, axes_dim=params.axes_dim)
         self.img_in = nn.Linear(self.in_channels, self.hidden_size, bias=True)
         self.time_in = MLPEmbedder(in_dim=256, hidden_dim=self.hidden_size)
-        self.img_norm = nn.LayerNorm(self.hidden_size)
-        self.txt_norm = nn.LayerNorm(self.hidden_size)
-        self.vec_norm = nn.LayerNorm(self.hidden_size)
+        # self.img_norm = nn.LayerNorm(self.hidden_size)
+        # self.txt_norm = nn.LayerNorm(self.hidden_size)
         self.vector_in = MLPEmbedder(params.vec_in_dim, self.hidden_size)
         self.guidance_in = (
             MLPEmbedder(in_dim=256, hidden_dim=self.hidden_size) if params.guidance_embed else nn.Identity()
@@ -121,7 +120,6 @@ class Flux(nn.Module):
 
         # embeddings
         img = self.img_in(img)
-        img = self.img_norm(img)
         debug("after img_in", img)
 
         vec = self.time_in(timestep_embedding(timesteps, 256))
@@ -136,21 +134,20 @@ class Flux(nn.Module):
         v2 = self.vector_in(y)
         debug("after vector_in", v2)
         vec = vec + v2
-        vec = self.vec_norm(vec)
 
         debug("after vec + vector_in", vec)
 
         txt = self.txt_in(txt)
-        txt = self.txt_norm(txt)
         debug("after txt_in", txt)
 
         # positional encodings
         ids = torch.cat((txt_ids, img_ids), dim=1)
         debug("ids",ids)
         pe = self.pe_embedder(ids)
+        pe = pe.to(dtype=torch.bfloat16)
         debug("after pe_embedder", pe)
 
-        # strength
+        
         if strengths is None:
             strengths = timesteps.new_ones(txt.shape[0])
 
@@ -158,10 +155,13 @@ class Flux(nn.Module):
         debug("delta_shift", delta_shift)
         debug("delta_scale", delta_scale)
 
-        # double blocks
+        
+        txt_mod_deltas=(delta_shift, delta_scale)
+
         for i, block in enumerate(self.double_blocks):
-            img, txt = block(img=img, txt=txt, vec=vec, pe=pe,
-                            txt_mod_deltas=(delta_shift, delta_scale))
+            img, txt = block(img=img, txt=txt, vec=vec, pe=pe,txt_mod_deltas = txt_mod_deltas)
+            # img = self.img_norm(img)
+            # txt = self.txt_norm(txt)
             debug(f"after DoubleBlock[{i}] img", img)
             debug(f"after DoubleBlock[{i}] txt", txt)
 
@@ -172,6 +172,7 @@ class Flux(nn.Module):
         # single blocks
         for i, block in enumerate(self.single_blocks):
             img = block(img, vec=vec, pe=pe)
+            # img = self.img_norm(img)
             debug(f"after SingleBlock[{i}]", img)
 
         # remove text tokens
