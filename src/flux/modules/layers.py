@@ -36,11 +36,11 @@ def timestep_embedding(t: Tensor, dim, max_period=10000, time_factor: float = 10
     """
     t = time_factor * t
     half = dim // 2
-    freqs = torch.exp(-math.log(max_period) * torch.arange(start=0, end=half, dtype=torch.float32) / half).to(
+    freqs = torch.exp(-math.log(max_period) * torch.arange(start=0, end=half, dtype=torch.bfloat16) / half).to(
         t.device
     )
 
-    args = t[:, None].float() * freqs[None]
+    args = t[:, None].to(dtype=torch.bfloat16)* freqs[None]
     embedding = torch.cat([torch.cos(args), torch.sin(args)], dim=-1)
     if dim % 2:
         embedding = torch.cat([embedding, torch.zeros_like(embedding[:, :1])], dim=-1)
@@ -67,7 +67,7 @@ class RMSNorm(torch.nn.Module):
 
     def forward(self, x: Tensor):
         x_dtype = x.dtype
-        x = x.float()
+        x = x.to(dtype=torch.bfloat16)
         rrms = torch.rsqrt(torch.mean(x**2, dim=-1, keepdim=True) + 1e-6)
         return (x * rrms).to(dtype=x_dtype) * self.scale
 
@@ -142,9 +142,9 @@ class StrengthProjector(nn.Module):
         # x: (B, 1) or (B,)
         # produce (B, dim)
         device = x.device
-        x = x.float().view(-1, 1)
+        x = x.to(dtype=torch.bfloat16).view(-1, 1)
         half = dim // 2
-        freqs = torch.exp(-math.log(10000.0) * torch.arange(half, device=device, dtype=torch.float32) / half)
+        freqs = torch.exp(-math.log(10000.0) * torch.arange(half, device=device, dtype=torch.bfloat16) / half)
         args = x * freqs[None, :]
         posenc = torch.cat([torch.sin(args), torch.cos(args)], dim=-1)
         if dim % 2:
@@ -200,14 +200,32 @@ class Modulation(nn.Module):
         self.is_double = double
         self.multiplier = 6 if double else 3
         self.lin = nn.Linear(dim, self.multiplier * dim, bias=True)
+        self.do_scale = False
 
     def forward(self, vec: Tensor) -> tuple[ModulationOut, ModulationOut | None]:
         out = self.lin(nn.functional.silu(vec))[:, None, :].chunk(self.multiplier, dim=-1)
 
-        return (
-            ModulationOut(*out[:3]),
-            ModulationOut(*out[3:]) if self.is_double else None,
-        )
+        shift,scale,gate = out[:3]
+        shift2 = None
+        scale2 = None
+        gate2 = None
+        if self.is_double:
+            shift2,scale2,gate2 = out[3:]
+            if self.do_scale:
+                shift2 = torch.tanh(shift2).to(dtype=torch.bfloat16)
+                scale2 = torch.tanh(scale2).to(dtype=torch.bfloat16)
+                gate2  = torch.sigmoid(gate2).to(dtype = torch.bfloat16)
+
+        if self.do_scale:    
+            shift = torch.tanh(shift).to(dtype=torch.bfloat16)
+            scale = torch.tanh(scale).to(dtype=torch.bfloat16)
+            gate = torch.sigmoid(gate).to(dtype=torch.bfloat16)
+
+
+
+        out1 = ModulationOut(shift, scale, gate)
+        out2 = ModulationOut(shift2, scale2, gate2) if self.is_double else None
+        return out1, out2
 
 
 class DoubleStreamBlock(nn.Module):
@@ -291,13 +309,13 @@ class DoubleStreamBlock(nn.Module):
         txt_attn, img_attn = attn[:, : txt.shape[1]], attn[:, txt.shape[1] :]
 
         # calculate the img blocks
-        img = img + img_mod1.gate * self.img_attn.proj(img_attn)
-        img = img + img_mod2.gate * self.img_mlp((1 + img_mod2.scale) * self.img_norm2(img) + img_mod2.shift)
+        img = img + (img_mod1.gate * self.img_attn.proj(img_attn))
+        img = img + (img_mod2.gate * self.img_mlp((1 + img_mod2.scale) * self.img_norm2(img) + img_mod2.shift))
 
         # calculate the txt blocks
-        txt = txt + txt_mod1.gate * self.txt_attn.proj(txt_attn)
-        txt = txt + txt_mod2.gate * self.txt_mlp((1 + txt_mod2.scale) * self.txt_norm2(txt) + txt_mod2.shift)
-        return img, txt
+        txt = txt + (txt_mod1.gate * self.txt_attn.proj(txt_attn))
+        txt = txt + (txt_mod2.gate * self.txt_mlp((1 + txt_mod2.scale) * self.txt_norm2(txt) + txt_mod2.shift))
+        return img.to(dtype=torch.bfloat16), txt.to(dtype=torch.bfloat16)
 
 
 class SingleStreamBlock(nn.Module):
@@ -345,7 +363,7 @@ class SingleStreamBlock(nn.Module):
         attn = attention(q, k, v, pe=pe)
         # compute activation in mlp stream, cat again and run second linear layer
         output = self.linear2(torch.cat((attn, self.mlp_act(mlp)), 2))
-        return x + mod.gate * output
+        return (x + (mod.gate * output)).to(dtype=torch.bfloat16)
 
 
 class LastLayer(nn.Module):
