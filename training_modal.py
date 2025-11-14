@@ -1,14 +1,11 @@
 import modal
-import sys
-import subprocess
-import os
+from pathlib import Path
 
-GPU_TYPE = "A100-80GB"
-PROJECT_FOLDER = "."  # include all files in this folder
-SCRIPT_NAME = "training.py"  # the script to execute
-
+# ------------------------------------------------------------
+# 1) Dependencies (installed ONCE at image-build time)
+# ------------------------------------------------------------
 all_deps = [
-    # --- Core dependencies ---
+    # Core
     "accelerate",
     "einops",
     "fire>=0.6.0",
@@ -21,38 +18,18 @@ all_deps = [
     "requests",
     "invisible-watermark",
     "ruff==0.6.8",
-    "accelerate",
 
-    # --- Optional: torch ---
+    # Torch
     "torch==2.6.0",
     "torchvision",
 
-    # --- Optional: streamlit ---
-    "streamlit",
-    "streamlit-drawable-canvas",
-    "streamlit-keyup",
-
-    # --- Optional: gradio ---
-    "gradio",
-
-    # --- Optional: tensorrt ---
-    "tensorrt-cu12==10.12.0.36",
-    "colored",
-    "opencv-python-headless==4.8.0.74",
-    "onnx>=1.18.0",
-    "onnxruntime~=1.22.0",
-    "onnxruntime-gpu~=1.22.0",
-    "onnx-graphsurgeon",
-    "polygraphy>=0.49.22",
-
-    # --- Meta optional group `all` ---
-    "flux[gradio]",
-    "flux[streamlit]",
-    "flux[torch]",
+    # Torch + transformers require numpy<2
+    "numpy<2",
 ]
 
-# all_deps = ['accelerate', 'torchvision', 'einops', 'fire >= 0.6.0', 'huggingface-hub', 'safetensors', 'sentencepiece', 'transformers >= 4.45.2', 'tokenizers', 'protobuf', 'requests', 'invisible-watermark', 'ruff == 0.6.8', 'accelerate', 'flux[gradio]', 'flux[streamlit]', 'flux[torch]']
-# ---- Build the Modal Image ----
+# ------------------------------------------------------------
+# 2) BUILD THE IMAGE (cached forever)
+# ------------------------------------------------------------
 image = (
     modal.Image.debian_slim(python_version="3.12")
     .apt_install([
@@ -62,50 +39,64 @@ image = (
         "libxrender1",
         "libxext6"
     ])
-    .add_local_dir(PROJECT_FOLDER, remote_path="/root/flux_training", copy=True)
-    .run_commands("cd /root/flux_training")
-    .uv_pip_install(all_deps + ["numpy<2"])
+    # Install deps ONCE and cache
+    .pip_install(all_deps)
+    # Copy your *entire repo* into the image so training never reloads
+    .add_local_dir(".", "/root/ft")      # <-- KEY MODIFICATION
 )
-# ---- Define Modal App ----
-app = modal.App(image=image, name="run-flux-training")
 
+# ------------------------------------------------------------
+# 3) VOLUME for datasets, checkpoints, outputs
+# ------------------------------------------------------------
+app = modal.App(name="flux-training",image=image)
+volume = modal.Volume.from_name("flux-project", create_if_missing=True)
+
+CACHE_DIR = Path("/cache") 
+cache_volume = modal.Volume.from_name("hf-hub-cache", create_if_missing=True) 
+volumes = {CACHE_DIR: cache_volume}
+
+# ------------------------------------------------------------
+# 4) TRAIN FUNCTION (no installs, only computation)
+# ------------------------------------------------------------
 @app.function(
     image=image,
-    gpu=GPU_TYPE,
-    timeout=1800,  # seconds (30 min); increase for longer runs
+    gpu="A100-80GB",
+    min_containers=1,        # Keep container warm, no re-init
+    volumes={"/root/vol": volume},
+    env = {
+        "HF_TOKEN": "***REMOVED***",
+        "HF_HOME": "/cache",
+        "HF_HUB_CACHE": "/cache",
+    },
+    timeout=60*60*24,
 )
-def run_training():
-    print(f"--- Running '{SCRIPT_NAME}' in {PROJECT_FOLDER} on {GPU_TYPE} GPU ---")
 
-    cwd = "/root/flux_training"
+def run_training(script_name="training.py"):
+    import subprocess
+    import sys
+    import os
+
+    # your baked-in repo lives here
+    code_dir = "/root/ft"
+
+    # set PYTHONPATH
     env = os.environ.copy()
-    # env["PYTHONPATH"] = cwd  # ensures imports like `from flux import ...` work
-    env["PYTHONPATH"] = f"{cwd}:{cwd}/src"
-    # Command to run the script
-    command = [sys.executable, SCRIPT_NAME]
+    env["PYTHONPATH"] = f"{code_dir}:{code_dir}/src"
 
-    process = subprocess.Popen(
-        command,
-        cwd=cwd,
+    # run training script
+    subprocess.run(
+        [sys.executable, script_name],
+        cwd=code_dir,
         env=env,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True,
-        bufsize=1
+        check=True,
     )
 
-    # Stream output live to Modal logs
-    for line in process.stdout:
-        print(line, end="")
-        sys.stdout.flush()
 
-    process.wait()
-    print(f"--- Training finished with exit code {process.returncode} ---")
-
-    if process.returncode != 0:
-        raise SystemExit(f"Training script exited with code {process.returncode}")
-
+# ------------------------------------------------------------
+# 5) Setup local volume
+# ------------------------------------------------------------
 @app.local_entrypoint()
-def main():
-    print(f"Deploying and running '{SCRIPT_NAME}' from '{PROJECT_FOLDER}' on Modal...")
-    run_training.remote()
+def create_volume():
+    print("Volume 'flux-project' is ready.")
+
+
