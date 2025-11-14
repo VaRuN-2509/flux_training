@@ -20,15 +20,11 @@ from torch.utils.data import Dataset, DataLoader
 from torchvision import transforms
 
 # Import model utilities
-from src.flux.model import FluxParams, FluxLoraWrapper
+from src.flux.model import FluxParams, FluxLoraWrapper,Flux
 from src.flux.util import load_flow_model, load_ae, load_clip,load_t5
 from src.flux.modules.layers import timestep_embedding
 
 
-
-# ================================================================
-# 1️⃣ Dataset: loads paired (x, y_s, s, prompt)
-# ================================================================
 class FluxLatentDataset(Dataset):
     """
     Dataset for curated edit dataset.
@@ -110,10 +106,21 @@ class FluxLatentDataset(Dataset):
         return len(self.samples)
 
     def __getitem__(self, idx):
+        out_dir = "debug_"
         src, tgt, s_val, prompt = self.samples[idx]
+        float_s = float(s_val)
+        src_img = Image.open(src).convert("RGB")
+        tgt_img = Image.open(tgt).convert("RGB")
+
+        os.makedirs(out_dir, exist_ok=True)
+
+        src_img.save(f"{out_dir}/src_{idx}.png")
+        tgt_img.save(f"{out_dir}/tgt_{idx}_s{float_s:.2f}.png")
+
+        print(f"Saved debug samples for idx {idx}")
         x = self.preproc(Image.open(src).convert("RGB"))
         y = self.preproc(Image.open(tgt).convert("RGB"))
-        return x, y, torch.tensor(s_val, dtype=torch.float), prompt
+        return x, y, torch.tensor(s_val, dtype=torch.bfloat16), prompt
 
 
 # ================================================================
@@ -122,9 +129,9 @@ class FluxLatentDataset(Dataset):
 class FluxPreprocessor:
     def __init__(self, ae, clip, t5, device):
         self.device = device
-        self.ae = ae.eval().to(device)
-        self.clip = clip.eval().to(device)
-        self.t5 = t5.eval().to(device)
+        self.ae = ae.to(device)
+        self.clip = clip.to(device)
+        self.t5 = t5.to(device)
         self.latent_proj = torch.nn.Linear(16, 64).to(device)
         nn.init.xavier_normal_(self.latent_proj.weight, gain=0.1)
         nn.init.constant_(self.latent_proj.bias, 0)
@@ -132,7 +139,7 @@ class FluxPreprocessor:
     @torch.no_grad()
     def encode_images(self, imgs):
         imgs = imgs.to(self.device, non_blocking=True)
-        with torch.autocast("cuda", dtype=torch.float16):
+        with torch.autocast("cuda", dtype=torch.bfloat16):
             lat = self.ae.encode(imgs)
             lat = lat.flatten(2).transpose(1, 2)
             lat = self.latent_proj(lat)
@@ -142,13 +149,9 @@ class FluxPreprocessor:
 
     @torch.no_grad()
     def encode_texts(self, prompts):
-        self.clip.to(self.device)
         clip_emb = self.clip(list(prompts))
-        self.clip.to("cpu")
 
-        self.t5.to(self.device)
         t5_emb = self.t5(list(prompts))
-        self.t5.to("cpu")
 
         txt_seq = t5_emb
         B = txt_seq.shape[0]
@@ -208,16 +211,15 @@ def report_tensor_size(name, t):
 
 
 # ================================================================
-# 3️⃣ Training Loop (flow matching loss)
+#  Training Loop (flow matching loss)
 # ================================================================
 def train_flux_kontext(model, dataloader, preproc, device="cuda",
                        lr=2e-5, epochs=10, save_dir="checkpoints"):
 
     os.makedirs(save_dir, exist_ok=True)
-    model.to(device,dtype=torch.float)
+    model.to(device,dtype=torch.bfloat16)
     # model.gradient_checkpointing_enable()
     optimizer = torch.optim.AdamW(filter(lambda p: p.requires_grad, model.parameters()), lr=lr)
-    scaler = torch.cuda.amp.GradScaler()
 
     for epoch in range(epochs):
         pbar = tqdm(dataloader, desc=f"Epoch {epoch+1}")
@@ -241,21 +243,21 @@ def train_flux_kontext(model, dataloader, preproc, device="cuda",
             ]
             print_gpu("After moving tensors to GPU")
 
-            x_seq = x_seq.to(device, non_blocking=True, dtype=torch.float)
-            y_seq = y_seq.to(device, non_blocking=True, dtype=torch.float)
-            txt_seq = txt_seq.to(device, non_blocking=True, dtype=torch.float)
-            clip_txt = clip_txt.to(device, non_blocking=True, dtype=torch.float)
+            x_seq = x_seq.to(device, non_blocking=True, dtype=torch.bfloat16)
+            y_seq = y_seq.to(device, non_blocking=True, dtype=torch.bfloat16)
+            txt_seq = txt_seq.to(device, non_blocking=True, dtype=torch.bfloat16)
+            clip_txt = clip_txt.to(device, non_blocking=True, dtype=torch.bfloat16)
             
             # IDs can keep their original type (likely int or float)
-            img_ids = img_ids.to(device, non_blocking=True,dtype=torch.float) 
-            txt_ids = txt_ids.to(device, non_blocking=True,dtype=torch.float)
+            img_ids = img_ids.to(device, non_blocking=True,dtype=torch.bfloat16) 
+            txt_ids = txt_ids.to(device, non_blocking=True,dtype=torch.bfloat16)
             report_tensor_size("img_ids",img_ids)
             report_tensor_size("txt_ids",txt_ids)
             print_gpu("After moving tensors to GPU")
 
             with torch.no_grad():
                 eps = torch.randn_like(y_seq)
-                t = torch.rand(y_seq.size(0), 1, 1, dtype=torch.float,device=device)
+                t = torch.rand(y_seq.size(0), 1, 1, dtype=torch.bfloat16,device=device)
                 y_seq = (1 - t) * y_seq + t * eps
 
             print_gpu("After noise mix")
@@ -281,7 +283,7 @@ def train_flux_kontext(model, dataloader, preproc, device="cuda",
             print_gpu("After forward pass")
             report_tensor_size("v_pred", v_pred32)
             report_tensor_size("x_seq", x_seq)
-            target = (eps - x_seq).float()
+            target = (eps - x_seq).to(dtype=torch.bfloat16)
             loss = F.mse_loss(v_pred32 , target)
             print(f"Target : {target}")
             print(f"loss: {loss}")
@@ -291,12 +293,10 @@ def train_flux_kontext(model, dataloader, preproc, device="cuda",
                 print("v_pred min/max", v_pred32.min(), v_pred32.max())
                 print("target min/max", target.min(), target.max())
 
-            scaler.scale(loss).backward()
+
+            loss.backward()
             print_gpu("After backward pass")
-
-            scaler.step(optimizer)
-            scaler.update()
-
+            optimizer.step()
             print_gpu("After optimizer step")
 
             pbar.set_postfix({"loss": f"{loss.item():.4f}"})
@@ -340,11 +340,16 @@ def main(args):
     )
 
     model = FluxLoraWrapper(lora_rank=4, lora_scale=1.0, params=params)
+    # model = Flux(params=params)
     model, missing = load_flow_model(model)
+
+    if missing is None or len(missing) == 0:
+        missing.append("final_layer.linear.weight")
 
     # Train only LoRA + Strength Projector
     for name, p in model.named_parameters():
         p.requires_grad = name in missing
+
 
     print(f"🔹 Trainable params: {sum(p.numel() for p in model.parameters() if p.requires_grad):,}")
 
