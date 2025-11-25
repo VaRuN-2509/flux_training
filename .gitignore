@@ -17,6 +17,9 @@ filter.py
 00008.png
 ckpt
 data_loader.json
+checkpoints
+checkpoint
+checkpoint2
 
 # temporary files which can be created if a process still has a handle open of a deleted file
 .fuse_hidden*
