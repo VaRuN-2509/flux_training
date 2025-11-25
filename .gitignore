@@ -6,8 +6,17 @@
 images_dir
 prompt
 checkpoints/
-
-
+tridesh.jpeg
+zip_modal.py
+sample.jpeg
+run_flux.py
+flux_.2.py
+filter.py
+01i.jpg
+3i.jpg
+00008.png
+ckpt
+data_loader.json
 
 # temporary files which can be created if a process still has a handle open of a deleted file
 .fuse_hidden*

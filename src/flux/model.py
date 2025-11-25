@@ -47,10 +47,12 @@ class Flux(nn.Module):
     Transformer model for flow matching on sequences.
     """
 
-    def __init__(self, params: FluxParams):
+    def __init__(self, params: FluxParams,strength_projector: bool):
         super().__init__()
 
         self.params = params
+        self.enable_strength_projector = strength_projector
+        print(f"The value of strength is : {self.enable_strength_projector}")
         self.in_channels = params.in_channels
         self.out_channels = params.out_channels
         if params.hidden_size % params.num_heads != 0:
@@ -72,8 +74,10 @@ class Flux(nn.Module):
             MLPEmbedder(in_dim=256, hidden_dim=self.hidden_size) if params.guidance_embed else nn.Identity()
         )
         self.txt_in = nn.Linear(params.context_in_dim, self.hidden_size)
-        self.strength_projector = StrengthProjector(hidden_size=self.hidden_size)
-
+        if self.enable_strength_projector:
+            self.strength_projector = StrengthProjector(hidden_size=self.hidden_size)
+        else:
+            self.strength_projector = None
 
         self.double_blocks = nn.ModuleList(
             [
@@ -102,7 +106,7 @@ class Flux(nn.Module):
         img_ids: Tensor,
         txt: Tensor,
         txt_ids: Tensor,
-        pooled_txt: Tensor,
+        pooled_txt : Tensor,
         timesteps: Tensor,
         y: Tensor,
         guidance: Tensor | None = None,
@@ -113,75 +117,77 @@ class Flux(nn.Module):
 
         print("==== Forward pass begin ====")
 
-        debug("input img", img)
-        debug("input txt", txt)
-        debug("input pooled_txt", pooled_txt)
-        debug("input y (clip)", y)
+        # debug("input img", img)
+        # debug("input txt", txt)
+        # debug("input pooled_txt", pooled_txt)
+        # debug("input y (clip)", y)
 
         # embeddings
         img = self.img_in(img)
-        debug("after img_in", img)
+        # debug("after img_in", img)
 
         vec = self.time_in(timestep_embedding(timesteps, 256))
-        debug("after time_in", vec)
+        # debug("after time_in", vec)
 
         if self.params.guidance_embed:
             g = self.guidance_in(timestep_embedding(guidance, 256))
-            debug("after guidance_in", g)
+            # debug("after guidance_in", g)
             vec = vec + g
-            debug("after vec + guidance", vec)
+            # debug("after vec + guidance", vec)
 
         v2 = self.vector_in(y)
-        debug("after vector_in", v2)
+        # debug("after vector_in", v2)
         vec = vec + v2
 
-        debug("after vec + vector_in", vec)
+        # debug("after vec + vector_in", vec)
 
         txt = self.txt_in(txt)
-        debug("after txt_in", txt)
+        # debug("after txt_in", txt)
 
         # positional encodings
         ids = torch.cat((txt_ids, img_ids), dim=1)
-        debug("ids",ids)
+        # debug("ids",ids)
         pe = self.pe_embedder(ids)
         pe = pe.to(dtype=torch.bfloat16)
-        debug("after pe_embedder", pe)
+        # debug("after pe_embedder", pe)
 
         
         if strengths is None:
             strengths = timesteps.new_ones(txt.shape[0])
-
-        delta_shift, delta_scale = self.strength_projector(strengths, pooled_txt)
-        debug("delta_shift", delta_shift)
-        debug("delta_scale", delta_scale)
+        if self.strength_projector is None:
+            txt_mod_deltas = None
+        else :
+            delta_shift, delta_scale = self.strength_projector(strengths, pooled_txt)
+            txt_mod_deltas=(delta_shift, delta_scale)
+        # debug("delta_shift", delta_shift)
+        # debug("delta_scale", delta_scale)
 
         
-        txt_mod_deltas=(delta_shift, delta_scale)
 
         for i, block in enumerate(self.double_blocks):
             img, txt = block(img=img, txt=txt, vec=vec, pe=pe,txt_mod_deltas = txt_mod_deltas)
             # img = self.img_norm(img)
             # txt = self.txt_norm(txt)
-            debug(f"after DoubleBlock[{i}] img", img)
-            debug(f"after DoubleBlock[{i}] txt", txt)
+            # debug(f"after DoubleBlock[{i}] img", img)
+            # debug(f"after DoubleBlock[{i}] txt", txt)
 
         # concat txt back
         img = torch.cat((txt, img), 1)
-        debug("after concat txt,img", img)
+        # debug("after concat txt,img", img)
 
         # single blocks
         for i, block in enumerate(self.single_blocks):
             img = block(img, vec=vec, pe=pe)
             # img = self.img_norm(img)
-            debug(f"after SingleBlock[{i}]", img)
+            # debug(f"after SingleBlock[{i}]", img)
 
         # remove text tokens
         img = img[:, txt.shape[1]:, :]
-        debug("after removing txt tokens", img)
+        # debug("after removing txt tokens", img)
 
         # final prediction
         img = self.final_layer(img, vec)
-        debug("after final_layer", img)
+        # debug("after final_layer", img)
 
         print("==== Forward pass end ====")
 
@@ -192,12 +198,13 @@ class Flux(nn.Module):
 class FluxLoraWrapper(Flux):
     def __init__(
         self,
+        strength_projector: bool,
         lora_rank: int = 128,
         lora_scale: float = 1.0,
         *args,
         **kwargs,
     ) -> None:
-        super().__init__(*args, **kwargs)
+        super().__init__(*args, **kwargs,strength_projector=strength_projector)
 
         self.lora_rank = lora_rank
 

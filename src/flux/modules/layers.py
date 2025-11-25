@@ -135,7 +135,7 @@ class StrengthProjector(nn.Module):
         # final outputs two vectors: delta_scale and delta_shift
         self.fc_out = nn.Linear(h2, 2 * hidden_size)
 
-        self.init_weights()
+        # self.init_weights()
 
     @staticmethod
     def sinusoidal_posenc(x: Tensor, dim: int = 128):
@@ -158,7 +158,17 @@ class StrengthProjector(nn.Module):
         returns: delta_shift, delta_scale each shaped (B, 1, hidden) to be broadcast over tokens
         """
         B = pooled_text.shape[0]
-        posenc = self.sinusoidal_posenc(s, self.posenc_dim)            # (B, posenc_dim)
+        # print(f"posenc shape {s.shape},{s.device}")
+        
+        posenc = self.sinusoidal_posenc(s, self.posenc_dim)
+        # print(f"posenc shape {posenc.shape},{posenc.device}")
+        device = self.s_posenc_linear.weight.device
+        dtype = self.s_posenc_linear.weight.dtype
+        posenc = posenc.to(device=device, dtype=dtype)
+        s = s.to(device)
+        # print(f"s shape {s.shape},{s.device}")
+        
+        pooled_text = pooled_text.to(device)          # (B, posenc_dim)
         s_emb = self.s_posenc_linear(posenc)                          # (B, 768)
         cat = torch.cat([s_emb, pooled_text], dim=-1)                 # (B, 1536)
         h = self.act1(self.fc1(cat))
@@ -170,7 +180,7 @@ class StrengthProjector(nn.Module):
         delta_scale = delta_scale[:, None, :]
         delta_shift = delta_shift[:, None, :]
 
-        return delta_shift, delta_scale
+        return delta_shift.to(device='cuda'), delta_scale.to(device='cuda')
     
     
 
@@ -262,18 +272,18 @@ class DoubleStreamBlock(nn.Module):
             print(f"[{name}] not a tensor")
             return
         t = tensor
-        print(f"[{name}] min={t.min().item():.5f}, max={t.max().item():.5f}, "
-            f"mean={t.mean().item():.5f}, any_nan={torch.isnan(t).any().item()}, "
-            f"dtype={t.dtype}, shape={tuple(t.shape)}")
+        # print(f"[{name}] min={t.min().item():.5f}, max={t.max().item():.5f}, "
+        #     f"mean={t.mean().item():.5f}, any_nan={torch.isnan(t).any().item()}, "
+        #     f"dtype={t.dtype},device = {t.device}, shape={tuple(t.shape)}")
 
-    def forward(self, img: Tensor, txt: Tensor, vec: Tensor, pe: Tensor,txt_mod_deltas:tuple[Tensor,Tensor]) -> tuple[Tensor, Tensor]:
+    def forward(self, img: Tensor, txt: Tensor, vec: Tensor, pe: Tensor,txt_mod_deltas:tuple[Tensor,Tensor] | None) -> tuple[Tensor, Tensor]:
         img_mod1, img_mod2 = self.img_mod(vec)
         txt_mod1, txt_mod2 = self.txt_mod(vec)
 
-        self.debug("txt_mod1",txt_mod1.shift)
-        self.debug("txt_mod2",txt_mod2.shift)
-        self.debug("txt_mod1",txt_mod1.scale)
-        self.debug("txt_mod2",txt_mod2.scale)
+        # self.debug("txt_mod1",txt_mod1.shift)
+        # self.debug("txt_mod2",txt_mod2.shift)
+        # self.debug("txt_mod1",txt_mod1.scale)
+        # self.debug("txt_mod2",txt_mod2.scale)
 
 
         if txt_mod_deltas is not None:
@@ -296,6 +306,9 @@ class DoubleStreamBlock(nn.Module):
         # prepare txt for attention
         txt_modulated = self.txt_norm1(txt)
         txt_modulated = (1 + txt_mod1.scale) * txt_modulated + txt_mod1.shift
+        print(txt_modulated.shape,txt_modulated.device,txt_modulated.dtype)
+        if txt_modulated.dtype != torch.bfloat16:
+            txt_modulated.to(dtype=torch.bfloat16)
         txt_qkv = self.txt_attn.qkv(txt_modulated)
         txt_q, txt_k, txt_v = rearrange(txt_qkv, "B L (K H D) -> K B H L D", K=3, H=self.num_heads)
         txt_q, txt_k = self.txt_attn.norm(txt_q, txt_k, txt_v)

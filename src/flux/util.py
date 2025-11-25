@@ -252,15 +252,23 @@ def save_image(
     nsfw_threshold: float = 0.85,
     track_usage: bool = False,
 ) -> int:
-    fn = output_name.format(idx=idx)
+
+    VOLUME_ROOT = Path("/root/data")
+    # build full path inside modal volume
+    fn = VOLUME_ROOT / output_name
+    fn.parent.mkdir(parents=True, exist_ok=True)
+
     print(f"Saving {fn}")
+
     # bring into PIL format and save
     x = x.clamp(-1, 1)
     x = rearrange(x[0], "c h w -> h w c")
 
     img = Image.fromarray((127.5 * (x + 1.0)).cpu().byte().numpy())
+
+    # nsfw check
     if nsfw_classifier is not None:
-        nsfw_score = [x["score"] for x in nsfw_classifier(img) if x["label"] == "nsfw"][0]
+        nsfw_score = [v["score"] for v in nsfw_classifier(img) if v["label"] == "nsfw"][0]
     else:
         nsfw_score = nsfw_threshold - 1.0
 
@@ -272,17 +280,21 @@ def save_image(
             exif_data[ExifTags.Base.Software] = "AI generated;img2img;flux"
         exif_data[ExifTags.Base.Make] = "Black Forest Labs"
         exif_data[ExifTags.Base.Model] = name
+
         if add_sampling_metadata:
             exif_data[ExifTags.Base.ImageDescription] = prompt
+
         img.save(fn, exif=exif_data, quality=95, subsampling=0)
+
         if track_usage:
             track_usage_via_api(name, 1)
+
         idx += 1
+
     else:
         print("Your generated image may contain NSFW content.")
 
     return idx
-
 
 @dataclass
 class ModelSpec:
@@ -654,15 +666,13 @@ def print_load_warning(missing: list[str], unexpected: list[str]) -> None:
         print(f"Got {len(unexpected)} unexpected keys:\n\t" + "\n\t".join(unexpected))
 
 
-def load_flow_model(model: FluxLoraWrapper, device: str | torch.device = "cuda", verbose: bool = True) :
+def load_flow_model(model: Flux, device: str | torch.device = "cuda", verbose: bool = True):
     # Loading Flux
-    name = "flux-dev-kontext"
     print("Init model")
+    name = "flux-dev-kontext"
     config = configs[name]
 
     ckpt_path = str(get_checkpoint_path(config.repo_id, config.repo_flow, "FLUX_MODEL"))
-
-    
 
     print(f"Loading checkpoint: {ckpt_path}")
     # load_sft doesn't support torch.device

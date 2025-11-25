@@ -59,11 +59,11 @@ def prepare(t5: HFEmbedder, clip: HFEmbedder, img: Tensor, prompt: str | list[st
         vec = repeat(vec, "1 ... -> bs ...", bs=bs)
 
     return {
-        "img": img,
-        "img_ids": img_ids.to(img.device),
-        "txt": txt.to(img.device),
-        "txt_ids": txt_ids.to(img.device),
-        "vec": vec.to(img.device),
+        "img": img.to(dtype=torch.bfloat16),
+        "img_ids": img_ids.to(device = img.device,dtype=torch.bfloat16),
+        "txt": txt.to(device=img.device,dtype=torch.bfloat16),
+        "txt_ids": txt_ids.to(device=img.device,dtype=torch.bfloat16),
+        "vec": vec.to(device=img.device,dtype=torch.bfloat16),
     }
 
 
@@ -213,7 +213,7 @@ def prepare_kontext(
     prompt: str | list[str],
     ae: AutoEncoder,
     img_cond_path: str,
-    seed: int,
+    seed: None | int,
     device: torch.device,
     target_width: int | None = None,
     target_height: int | None = None,
@@ -321,6 +321,7 @@ def denoise(
     # extra img tokens (sequence-wise)
     img_cond_seq: Tensor | None = None,
     img_cond_seq_ids: Tensor | None = None,
+    strengths=torch.tensor(1.0, dtype=torch.bfloat16, device="cuda"),
 ):
     # this is ignored for schnell
     guidance_vec = torch.full((img.shape[0],), guidance, device=img.device, dtype=img.dtype)
@@ -341,9 +342,11 @@ def denoise(
             img_ids=img_input_ids,
             txt=txt,
             txt_ids=txt_ids,
+            pooled_txt = vec,
             y=vec,
             timesteps=t_vec,
             guidance=guidance_vec,
+            strengths=strengths,
         )
         if img_input_ids is not None:
             pred = pred[:, : img.shape[1]]
