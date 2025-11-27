@@ -30,7 +30,7 @@ from src.flux.util import (
     load_t5,
     save_image,
 )
-os.environ['HF_TOKEN'] = "***REMOVED***"
+HF_TOKEN = os.environ["HF_TOKEN"]
 
 
 @dataclass

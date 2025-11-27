@@ -28,8 +28,8 @@ from src.flux.modules.layers import timestep_embedding
 
 
 import random
-os.environ['HF_TOKEN'] = "***REMOVED***"
 
+HF_TOKEN = os.environ["HF_TOKEN"]
 
 
 class CleanedFluxDataset(Dataset):
