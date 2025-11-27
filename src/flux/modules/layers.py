@@ -272,9 +272,9 @@ class DoubleStreamBlock(nn.Module):
             print(f"[{name}] not a tensor")
             return
         t = tensor
-        # print(f"[{name}] min={t.min().item():.5f}, max={t.max().item():.5f}, "
-        #     f"mean={t.mean().item():.5f}, any_nan={torch.isnan(t).any().item()}, "
-        #     f"dtype={t.dtype},device = {t.device}, shape={tuple(t.shape)}")
+        print(f"[{name}] min={t.min().item():.5f}, max={t.max().item():.5f}, "
+            f"mean={t.mean().item():.5f}, any_nan={torch.isnan(t).any().item()}, "
+            f"dtype={t.dtype},device = {t.device}, shape={tuple(t.shape)}")
 
     def forward(self, img: Tensor, txt: Tensor, vec: Tensor, pe: Tensor,txt_mod_deltas:tuple[Tensor,Tensor] | None) -> tuple[Tensor, Tensor]:
         img_mod1, img_mod2 = self.img_mod(vec)

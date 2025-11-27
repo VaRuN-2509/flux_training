@@ -82,12 +82,7 @@ def process_volume(volume_root, lpips_model, strengths=8):
         print("❌ Missing output_log → skipping")
         return filtered_entries
 
-    categories = [
-        c for c in sorted(os.listdir(volume_root))
-        if os.path.isdir(os.path.join(volume_root, c))
-        and c not in ["output_log", "lora", "output", "cleaned_samples"]
-        and not c.startswith(".")
-    ]
+    categories = ["Adjust_global_lighting_(golden_hour-fluorescent)"]
 
     print(f"📁 Categories found: {categories}")
 
@@ -177,7 +172,7 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     # Manually set volumes (your use case)
-    volumes = ["/root/data", "/root/data_2"]
+    volumes = ["/root/data"]
 
     print("🔥 Loading fast LPIPS (torchmetrics, squeeze)...")
     lpips_model = LearnedPerceptualImagePatchSimilarity(

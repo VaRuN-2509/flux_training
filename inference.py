@@ -30,6 +30,7 @@ from src.flux.util import (
     load_t5,
     save_image,
 )
+os.environ['HF_TOKEN'] = "***REMOVED***"
 
 
 @dataclass
@@ -251,7 +252,7 @@ def main(
 
     torch_device = torch.device(device)
 
-    output_name = os.path.join(output_dir, f"img_{prompt}.jpg")
+    output_name = os.path.join(output_dir, f"img_{prompt}_{strengths}.jpg")
     if not os.path.exists(output_dir):
         os.makedirs(output_dir)
         idx = 0
@@ -302,10 +303,10 @@ def main(
     # model, missing = load_flow_model(model)
     if strength_projector:
         model = FluxLoraWrapper(strength_projector=strength_projector,lora_rank=4, lora_scale=1.0, params=params)
-        CHECKPOINT_PATH = "/root/data/checkpoints/epoch_20.pt"
+        CHECKPOINT_PATH = "/root/data/flux-checkpoints/latest_epoch=7.pt"
         print("Loading checkpoint:", CHECKPOINT_PATH)
         state = torch.load(CHECKPOINT_PATH, map_location="cpu")
-        load_result = model.load_state_dict(state, strict=False)
+        load_result = model.load_state_dict(state["model_state"], strict=False)
         if load_result.missing_keys:
             print("\n⚠️ Missing keys in checkpoint (not found in model):")
             for k in load_result.missing_keys:
@@ -528,13 +529,13 @@ if __name__ == "__main__":
             return json.loads(cleaned)
 
 
-    prompt = "change the image into LEGO style"
+    prompt = "make the background slightly darker"
     print(prompt)
-    img_path = ["3i.jpg"]
+    img_path = ["tridesh.jpeg"]
     # strengths=[torch.tensor(0.65, dtype=torch.bfloat16, device="cuda"),torch.tensor(0.1, dtype=torch.bfloat16, device="cuda")]
-    strenght = [0.23,0.01]
+    strenght = [0.15]
     strengths = torch.tensor(strenght[0], dtype=torch.bfloat16, device="cuda")
-    main(strength_projector=False,prompt=prompt,img_cond_path=img_path[0],strengths=strengths)
+    main(strength_projector=True,prompt=prompt,img_cond_path=img_path[0],strengths=strengths)
 
     # for i in range (len(prompt)):
     #     strengths = torch.tensor(strenght[i], dtype=torch.bfloat16, device="cuda") 

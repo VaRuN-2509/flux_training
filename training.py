@@ -28,7 +28,7 @@ from src.flux.modules.layers import timestep_embedding
 
 
 import random
-
+os.environ['HF_TOKEN'] = "***REMOVED***"
 
 
 
@@ -225,7 +225,7 @@ def train_flux_kontext(
     lr=2e-5,
     epochs=10,
     save_dir="checkpoints",
-    resume_from=None
+    resume_from = None,
 ):
 
     os.makedirs(save_dir, exist_ok=True)
@@ -380,7 +380,7 @@ def main(args):
     print(f"🔹 Trainable params: {sum(p.numel() for p in model.parameters() if p.requires_grad):,}")
 
     # Dataset & loader
-    dataset = CleanedFluxDataset("cleaned_samples.json")
+    dataset = CleanedFluxDataset("cleaned_samples_fixed.json")
     print(f"batch size : {args.batch_size}")
     num_workers = min(8, max(1, (os.cpu_count() or 4) - 1))
     dataloader = DataLoader(
@@ -395,7 +395,7 @@ def main(args):
 
     # Start training
     train_flux_kontext(model, dataloader, preproc, device, lr=args.lr,
-                       epochs=args.epochs, save_dir=args.save_dir)
+                       epochs=args.epochs, save_dir=args.save_dir,resume_from="/root/data/checkpoints")
 
 
 if __name__ == "__main__":

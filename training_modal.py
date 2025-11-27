@@ -56,16 +56,14 @@ image = (
 # ------------------------------------------------------------
 # 3) VOLUME for datasets, checkpoints, outputs
 # ------------------------------------------------------------
-app = modal.App(name="flux.2",image=image)
+app = modal.App(name="flux_inference",image=image)
 volume = modal.Volume.from_name("flux-project", create_if_missing=True)
 
 CACHE_DIR = Path("/cache") 
 cache_volume = modal.Volume.from_name("hf-hub-cache", create_if_missing=True) 
 volumes = {CACHE_DIR: cache_volume}
 
-vol = modal.Volume.from_name("my-volume",create_if_missing=True)
-vol_2 = modal.Volume.from_name("my-volume-2",create_if_missing=True)
-# ------------------------------------------------------------
+vol = modal.Volume.from_name("dataset",create_if_missing=True)
 # 4) TRAIN FUNCTION (no installs, only computation)
 # ------------------------------------------------------------
 @app.function(
@@ -74,7 +72,6 @@ vol_2 = modal.Volume.from_name("my-volume-2",create_if_missing=True)
     min_containers=1,        # Keep container warm, no re-init
     volumes={
         "/root/data": vol,
-        "/root/data_2": vol_2,
     },
     env = {
         "HF_HOME": "/cache",
@@ -83,7 +80,7 @@ vol_2 = modal.Volume.from_name("my-volume-2",create_if_missing=True)
     timeout=60*60*24,
 )
 
-def run_training(script_name="flux_.2.py"):
+def run_training(script_name="inference.py"):
     import subprocess
     import sys
     import os
